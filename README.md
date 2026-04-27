@@ -1,6 +1,6 @@
 # ok_color — 다중 구현 비교 프로젝트
 
-Björn Ottosson 의 [Oklab 색공간](https://bottosson.github.io/posts/oklab/) 단일-헤더 라이브러리 [`ok_color.h`](https://bottosson.github.io/misc/ok_color.h) 를 기반으로, **scalar → SIMD 4-wide → SIMD 16-wide → hybrid** 까지 단계적으로 재구현하며 각 단계의 **성능·정확도·트레이드오프**를 측정한 비교 프로젝트.
+Björn Ottosson 의 [Oklab 색공간](https://bottosson.github.io/posts/oklab/) 단일-헤더 라이브러리 [`ok_color.h`](https://bottosson.github.io/misc/ok_color.h) 를 기반으로, **scalar → SIMD 4-wide → SIMD 16-wide → hybrid → CUDA** 까지 단계적으로 재구현하며 각 단계의 **성능·정확도·트레이드오프**를 측정한 비교 프로젝트.
 
 ## 디렉토리 구조
 
@@ -15,10 +15,11 @@ ok_color/
 ├── simd_sse/                         # SSE4.1 + FMA, 4-pixel SoA batch
 ├── simd_avx512_vl/                   # 같은 소스, AVX-VL EVEX 빌드 (비교 측정)
 ├── simd_avx512/                      # AVX-512, 16-pixel SoA batch
-├── hybrid/                           # 함수별 최적 라우팅 (production 추천)
+├── hybrid/                           # 함수별 최적 라우팅 (CPU 추천)
+├── cuda/                             # CUDA, thread 당 1 픽셀
 │
 ├── tests/                            # 정확성 검증 (orig vs 각 구현)
-└── benches/                          # 성능 측정 (master_bench 가 메인)
+└── benches/                          # 성능 측정
 ```
 
 각 디렉토리의 `INDEX.md` 에 해당 구현의 상세 설명·성능·사용 시점이 정리되어 있다.
@@ -33,11 +34,14 @@ ok_color/
 | **simd_sse** | 4-pixel SoA batch | `simd_sse/` | SSE4.1 + FMA |
 | **simd_avx512_vl** | 4-pixel batch (EVEX 인코딩) | `simd_avx512_vl/` | AVX-512VL |
 | **simd_avx512** | 16-pixel SoA batch | `simd_avx512/` | AVX-512F+DQ+BW+VL |
-| **hybrid** ⭐ | 함수별 최적 라우팅 | `hybrid/` | 위 모두 |
+| **hybrid** ⭐ | 함수별 최적 라우팅 | `hybrid/` | 위 SIMD 모두 |
+| **cuda** | thread 당 1 픽셀 (SIMT) | `cuda/` | CUDA + NVIDIA GPU |
 
-## 측정 결과 (Zen 5 / AMD Ryzen 9 9950X)
+## 측정 결과
 
-`benches/master_bench.cpp` 출력. 단위 = **ns/pixel** (작을수록 빠름).
+### 1) per-call throughput — `benches/master_bench.cpp`
+
+CPU 입력풀 4096, 단일 호출 ns/pixel (Zen 5 / AMD Ryzen 9 9950X).
 
 | 함수 | orig | vec3 | vec4 | SSE×4 | AVX-VL×4 | AVX512×16 | **Hybrid** |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -48,63 +52,92 @@ ok_color/
 | okhsv→srgb | 125 | 115 | 126 | 25.8 | 25.9 | 8.14 | **8.16** |
 | srgb→okhsv | 155 | 136 | 147 | 28.1 | 28.3 | 9.22 | **9.27** |
 
-**Hybrid 가 모든 함수에서 동률 1위 또는 노이즈 안 (±2%).** scalar 대비 9-15x 가속.
+Hybrid 가 모든 함수에서 동률 1위 — scalar 대비 9-15x 가속.
+
+### 2) 100K-픽셀 한 방 시나리오 — `benches/master_all.cu` (CPU + GPU)
+
+이미지 한 장 (≈ 316×316) 변환을 한 번에 한다고 가정. 총 처리 시간 (ms).
+CPU 는 100ms timeout 안에 모두 완주 (TO 표기 없음).
+
+| 함수 | orig | vec3 | vec4 | SSE×4 | AVXVL×4 | AVX×16 | Hybrid | **GPU(K)** | GPU(RT) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| linear_srgb→oklab | 2.51 | 2.48 | 2.58 | 0.22 | 0.22 | 0.25 | 0.22 | **0.004** | 0.48 |
+| oklab→linear_srgb | 0.24 | 0.23 | 0.41 | 0.07 | 0.07 | 0.17 | 0.06 | **0.004** | 0.48 |
+| okhsl→srgb | 10.7 | 10.2 | 10.7 | 2.89 | 2.88 | 0.92 | 0.93 | **0.008** | 0.38 |
+| srgb→okhsl | 13.2 | 12.0 | 12.7 | 3.06 | 3.07 | 0.99 | 0.98 | **0.008** | 0.38 |
+| okhsv→srgb | 11.5 | 11.2 | 12.1 | 2.57 | 2.57 | 0.85 | 0.84 | **0.007** | 0.38 |
+| srgb→okhsv | 14.4 | 12.9 | 14.2 | 2.86 | 2.82 | 0.95 | 0.95 | **0.007** | 0.39 |
+
+표기:
+- **GPU(K)** = Kernel only, 데이터가 이미 GPU 에 있다고 가정.
+- **GPU(RT)** = Round-Trip, `cudaMemcpy` H2D + 커널 + D2H 전체 시간.
 
 ## 정확성
 
 `tests/` 에서 각 구현 검증:
 - **scalar (vec3/vec4)**: 1e-7 이내 (1 ULP 수준)
-- **SIMD (SSE/AVX512)**: 1e-5 ~ 1e-3 (packed cbrt/log/exp/sincos 다항식 근사 누적)
+- **SIMD (SSE/AVX512)**: 1e-5 ~ 1e-3 (packed cbrt/log/exp/sincos 다항식 근사)
+- **CUDA**: 1e-6 이내 (HW transcendental 사용, SIMD 보다 정확)
 - 모든 1100+ 테스트 케이스 통과
 
 ## 단계별 핵심 통찰
 
-### 1. **분리·정리만으로 ~5-15% 가속**
+### 1) **분리·정리만으로 ~5-15% 가속**
 원본 `inline` 함수들을 헤더/구현으로 나누고 행렬을 named constexpr 로 추출하면 컴파일러가 더 잘 최적화한다.
 
-### 2. **vec4 (16-byte 정렬) 가 더 느릴 수 있다** ❗
+### 2) **vec4 (16-byte 정렬) 가 더 느릴 수 있다** ❗
 직관과 반대. `.w = 0` padding lane 의 *낭비된* scalar FMA 와 `alignas(16)` 의 stack alignment 비용이 커, AoS 단일-색에서 vec3 (12-byte) 가 더 빠름.
 
-### 3. **packed cbrt 가 진짜 게임 체인저**
+### 3) **packed cbrt 가 진짜 게임 체인저**
 원본 `cbrtf` 가 30-60 cycle. bit-hack + Newton 2회 packed 구현으로 lane 당 ~10 cycle. Lab 변환에서 **11.9x 가속** 의 핵심.
 
-### 4. **AVX-512 가 만능이 아니다**
+### 4) **AVX-512 가 만능이 아니다**
 - HSL/HSV (transcendental 무거움): SSE 의 3배 빠름.
 - Lab↔RGB (가벼운 행렬): gather/scatter overhead 가 본체보다 커서 **SSE 보다 느림** (oklab→linear_srgb 가 2.5배 느려짐).
 - 결론: 함수별 라우팅이 정답.
 
-### 5. **단일-색 OoO 도 매우 빠름**
+### 5) **단일-색 OoO 도 매우 빠름**
 `scalar_vec3::to_linear_srgb` 1.89 ns/op = ~5.7 cycle. 모던 OoO 엔진의 ILP 가 인접 반복을 파이프라인하면서 SIMD 와 경쟁 가능. SIMD 의 진짜 가치는 batch (이미지 변환) 에서 나옴.
+
+### 6) **GPU 의 진짜 비용은 PCIe 전송**
+RTX 4080 SUPER 에서 100K 픽셀 변환:
+- Kernel only: 4-8 μs (모든 함수가 비슷 — **memory bandwidth bound**)
+- Round-trip: 380-480 μs (PCIe 4.0 의 1.6MB × 2 전송이 거의 전부)
+
+→ 가벼운 함수 (Lab↔RGB) 는 **CPU Hybrid 가 GPU 보다 빠름**. transcendental 무거운 HSL/HSV 는 GPU round-trip 가 2.5배 빠름. GPU 가 진짜 빛나는 영역은 *데이터가 이미 GPU 에 있는* 파이프라인 중간.
 
 ## 빌드
 
 ```bash
-./build.sh           # 전체 빌드 + 정확성 + 성능 (기본)
-./build.sh master    # master_bench 만
-./build.sh tests     # 정확성만
-./build.sh benches   # 성능만
+./build.sh           # CPU 전체 (정확성 + 성능)
+./build.sh master    # CPU master_bench 만
+./build.sh cuda      # CUDA 빌드 (cuda_bench + master_all)
+./build.sh all       # CPU + CUDA 모두
 ./build.sh clean     # build/ 제거
 ```
 
 요구 사항:
 - g++ 또는 clang++ (C++17)
-- 최소: SSE4.1 + FMA3 (2013년 이후 거의 모든 x86)
-- 최대: AVX-512F + DQ + BW + VL (Zen 4+, Ice Lake+, Sapphire Rapids+)
+- 최소: SSE4.1 + FMA3
+- 권장: AVX-512F + DQ + BW + VL (Zen 4+, Ice Lake+, Sapphire Rapids+)
+- CUDA: nvcc + NVIDIA GPU (compute capability 7.0 이상). 기본 `sm_89` (Ada).
 
-플래그:
-```
--O3 -flto -mavx512f -mavx512dq -mavx512bw -mavx512vl -mfma -msse4.1
+CUDA 아키텍처 변경:
+```bash
+NVCC_ARCH=sm_80 ./build.sh cuda  # Ampere
+NVCC_ARCH=sm_90 ./build.sh cuda  # Hopper
 ```
 
 ## 사용 시 추천
 
 | 시나리오 | 추천 |
 |---|---|
-| Zen 4+/SPR+ production | **hybrid** (모든 함수에서 best-of-breed) |
-| 단일-픽셀 GUI / color picker | **scalar_vec3** (1.89 ns/op, 컴파일러 친화) |
-| 호환성 우선 (구형 CPU 포함) | **simd_sse** (3-12x 가속, 어디서든 동작) |
-| AVX-512 가능한 이미지 일괄 처리 | **hybrid** (단일 SIMD 폭 고정보다 빠름) |
-| 학습·이해 | 폴더 순서대로 — 단계별 통찰 |
+| **GUI / color picker** (단일 픽셀) | `scalar_vec3` (1.89 ns/op, 컴파일러 친화) |
+| **이미지 일괄 변환, AVX-512 가능 CPU** | `hybrid` (모든 함수 best-of-breed) |
+| **호환성 우선** (구형 CPU 포함) | `simd_sse` (3-12x 가속, 어디서든 동작) |
+| **GPU 파이프라인 중간** (디코더 → 색 변환 → ML) | `cuda` (kernel only 100x+) |
+| **GPU 단발성 변환** (CPU 데이터 → GPU → CPU) | 가벼운 함수는 `hybrid`, 무거운 함수는 `cuda` (PCIe 비용 고려) |
+| **학습·이해** | 폴더 순서대로 — 단계별 통찰 |
 
 ## 라이선스
 
@@ -113,6 +146,6 @@ ok_color/
 ## 참고 자료
 
 - [Oklab — A perceptual color space](https://bottosson.github.io/posts/oklab/)
-- [How software gets color wrong](https://bottosson.github.io/posts/colorpicker/) — OkHSL/OkHSV 설계
-- [Gamut clipping](https://bottosson.github.io/posts/gamutclipping/) — 5가지 clipping 전략
+- [How software gets color wrong](https://bottosson.github.io/posts/colorpicker/)
+- [Gamut clipping](https://bottosson.github.io/posts/gamutclipping/)
 - 원본 헤더: <https://bottosson.github.io/misc/ok_color.h>
