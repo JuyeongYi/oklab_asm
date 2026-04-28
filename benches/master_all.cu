@@ -1,9 +1,10 @@
-// master_all.cu — 100K 픽셀 한 방 시나리오, CPU 타임아웃 지원.
+// master_all.cu — 2048² 픽셀 (4M, 한 장의 4K 텍스처) 한 방 시나리오.
 //
 //   CPU 는 각 round 가 timeout_ms 를 넘기면 그 시점까지 처리한 픽셀 수와 함께 조기 종료.
 //   GPU 는 단일 kernel launch (timeout 무관).
 //
 //   메모리: explicit cudaMalloc / cudaMemcpy / cudaFree (unified 안 씀).
+//   메모리 사용량: 8 × 4M × 16 bytes = 512 MB host + 512 MB device.
 
 #include "../scalar_vec3/ok_color.h"
 #include "../scalar_vec4/ok_color_v4.h"
@@ -37,8 +38,8 @@ namespace cu  = ok_color_cuda;
 using clock_t_ = std::chrono::steady_clock;
 static volatile float g_sink = 0.f;
 
-constexpr double TIMEOUT_MS = 100.0;
-constexpr int    ROUNDS     = 9;
+constexpr double TIMEOUT_MS = 300.0;
+constexpr int    ROUNDS     = 7;
 
 // CPU 측 결과: ms 와 처리한 픽셀.  pixels < total 이면 timeout.
 struct CpuResult { double ms; int pixels; bool timed_out; };
@@ -81,25 +82,27 @@ static float bench_gpu_min_ms(std::function<void()> launch) {
 	return best;
 }
 
-// 출력 헬퍼: 시간 ms 또는 "TO X.XK" (timeout 시 처리한 픽셀 수).
+// 출력 헬퍼: 시간 ms 또는 "TO X.XM" (timeout 시 처리한 픽셀 수).
 static std::string fmt(const CpuResult& r) {
 	char buf[32];
 	if (r.timed_out) {
-		std::snprintf(buf, sizeof buf, "TO%5.1fK", r.pixels / 1000.0);
+		std::snprintf(buf, sizeof buf, "TO%5.2fM", r.pixels / 1e6);
 	} else {
-		std::snprintf(buf, sizeof buf, "%7.3f", r.ms);
+		std::snprintf(buf, sizeof buf, "%7.2f", r.ms);
 	}
 	return buf;
 }
 
 int main()
 {
-	constexpr int K   = 100'000;
+	constexpr int W = 2048;
+	constexpr int K   = W * W;            // 2048² = 4,194,304 pixels
 	constexpr int K16 = (K + 15) & ~15;
 
 	cudaDeviceProp prop;
 	CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
-	std::printf("=== 100K-픽셀 한 방 시나리오 (timeout=%g ms / round) ===\n", TIMEOUT_MS);
+	std::printf("=== %d² (%.2f M) 픽셀 한 방 시나리오 (timeout=%g ms / round) ===\n",
+		W, K / 1e6, TIMEOUT_MS);
 	std::printf("입력: %d 픽셀, %.2f MB I/O 한 방향\n", K,
 		K * sizeof(s4::RGB4) / (1024.0 * 1024));
 	std::printf("CPU: %d round 의 min ms.  TO 표기 = timeout, 처리된 픽셀(K) 단위\n",
