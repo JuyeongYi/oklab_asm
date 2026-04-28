@@ -56,7 +56,7 @@ Hybrid 가 모든 함수에서 동률 1위 — scalar 대비 9-15x 가속.
 
 ### 2) 2048² (4M) 픽셀 한 방 시나리오 — `benches/master_all.cu` (CPU + GPU)
 
-4K 이미지 한 장 변환을 한 번에 한다고 가정. 총 처리 시간 (ms).
+2K 이미지 한 장 변환을 한 번에 한다고 가정. 총 처리 시간 (ms).
 CPU 는 300ms timeout — 그 안에 못 끝내면 처리한 픽셀 수와 함께 조기 종료.
 
 | 함수 | orig | vec3 | vec4 | SSE×4 | AVXVL×4 | AVX×16 | Hybrid | **GPU(K)** | GPU(RT) |
