@@ -17,6 +17,8 @@ ok_color/
 ├── simd_avx512/                      # AVX-512, 16-pixel SoA batch
 ├── hybrid/                           # 함수별 최적 라우팅 (CPU 추천)
 ├── cuda/                             # CUDA, thread 당 1 픽셀
+├── ptx/                              # 인라인 PTX (NVIDIA virtual ISA) 시도
+├── tensor/                           # Tensor Core (wmma TF32) 시도 (반증 자료)
 │
 ├── tests/                            # 정확성 검증 (orig vs 각 구현)
 └── benches/                          # 성능 측정
@@ -36,6 +38,8 @@ ok_color/
 | **simd_avx512** | 16-pixel SoA batch | `simd_avx512/` | AVX-512F+DQ+BW+VL |
 | **hybrid** ⭐ | 함수별 최적 라우팅 | `hybrid/` | 위 SIMD 모두 |
 | **cuda** | thread 당 1 픽셀 (SIMT) | `cuda/` | CUDA + NVIDIA GPU |
+| **ptx** | inline PTX 로 핵심 변환 재구현 | `ptx/` | sm_70+ |
+| **tensor** | Tensor Core wmma TF32 (반증 자료) | `tensor/` | sm_80+ |
 
 ## 측정 결과
 
@@ -107,7 +111,12 @@ CPU 는 300ms timeout — 그 안에 못 끝내면 처리한 픽셀 수와 함�
 ### 5) **단일-색 OoO 도 매우 빠름**
 `scalar_vec3::to_linear_srgb` 1.89 ns/op = ~5.7 cycle. 모던 OoO 엔진의 ILP 가 인접 반복을 파이프라인하면서 SIMD 와 경쟁 가능. SIMD 의 진짜 가치는 batch (이미지 변환) 에서 나옴.
 
-### 6) **GPU 의 진짜 비용은 PCIe 전송**
+### 6) **PTX / Tensor Core 도 memory-bound 앞에선 무력**
+- **인라인 PTX** (lg2.approx + ex2.approx 합성 cbrt, sin/cos/rcp.approx): 표준 cmath CUDA 와 ±5% 측정잡음 안 — 컴퓨트 절약이 메모리 wait 에 가려짐.
+- **Tensor Core wmma TF32**: 1.000x 동률. 4M × 32B = 128MB 가 0.207ms 에 PCIe 통과 안 한 device-mem bandwidth 84% 활용. 더 빨라질 수 없음.
+- 두 도구 모두 강력하지만 **워크로드가 compute-bound 일 때만** 빛남. 색상 변환 같은 streaming 워크로드는 메모리 대역폭이 한계.
+
+### 7) **GPU 의 진짜 비용은 PCIe 전송**
 RTX 4080 SUPER 에서 100K 픽셀 변환:
 - Kernel only: 4-8 μs (모든 함수가 비슷 — **memory bandwidth bound**)
 - Round-trip: 380-480 μs (PCIe 4.0 의 1.6MB × 2 전송이 거의 전부)

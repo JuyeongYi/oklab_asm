@@ -75,6 +75,18 @@ case "${1:-cpu}" in
 		run_target cuda_bench
 		run_target master_all
 		;;
+	ptx)
+		echo "[nvcc] ptx_full"
+		$NVCC -O3 -arch=$NVCC_ARCH -std=c++17 -Icuda \
+			cuda/ok_color_cuda.cu ptx/ok_color_ptx_full.cu -o build/ptx_full
+		run_target ptx_full
+		;;
+	tensor)
+		echo "[nvcc] tensor_bench"
+		$NVCC -O3 -arch=$NVCC_ARCH -std=c++17 -Icuda \
+			cuda/ok_color_cuda.cu tensor/ok_color_tensor.cu -o build/tensor_bench
+		run_target tensor_bench
+		;;
 	tests)
 		build_cpu compare_test    tests/compare_test.cpp
 		build_cpu simd_verify     tests/simd_verify.cpp
